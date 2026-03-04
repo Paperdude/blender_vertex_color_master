@@ -1119,22 +1119,46 @@ class VERTEXCOLORMASTER_OT_EditBrushSettings(bpy.types.Operator):
         return obj is not None and obj.mode == 'VERTEX_PAINT' and obj.type == 'MESH'
 
     def execute(self, context):
-        # In case the user is using another brush, always revert to Draw
-        # to avoid messing up the settings of other brushes.
-        brush = bpy.data.brushes['Draw']
+        prev_color, prev_secondary_color = get_vertex_paint_colors(context)
+        brush = context.tool_settings.vertex_paint.brush
 
-        # This changed between Blender 2.79 -> 2.80, but keeping blur here
         if self.blend_mode == 'BLUR':
-            brush = bpy.data.brushes['Blur']
+            applied = False
+            try:
+                bpy.ops.paint.brush_select(mode='VERTEX_PAINT', vertex_tool='BLUR')
+                applied = True
+            except Exception:
+                pass
+            if not applied:
+                try:
+                    bpy.ops.paint.brush_select(paint_mode='VERTEX_PAINT', vertex_paint_tool='BLUR')
+                    applied = True
+                except Exception:
+                    pass
+            if not applied:
+                try:
+                    bpy.ops.wm.tool_set_by_id(name="builtin_brush.Blur")
+                    applied = True
+                except Exception:
+                    pass
+            if not applied and hasattr(brush, 'blend'):
+                try:
+                    brush.blend = 'BLUR'
+                    applied = True
+                except Exception:
+                    pass
+            if not applied:
+                self.report({'WARNING'}, "Blur mode is unavailable for current brush/tool in this Blender version.")
         else:
-            brush.vertex_tool = 'DRAW'
-            brush.blend = self.blend_mode
+            if hasattr(brush, 'vertex_tool'):
+                try:
+                    brush.vertex_tool = 'DRAW'
+                except Exception:
+                    pass
+            if hasattr(brush, 'blend'):
+                brush.blend = self.blend_mode
 
-        # Copy brush colors
-        prev_brush = context.tool_settings.vertex_paint.brush
-        brush.color = prev_brush.color
-        brush.secondary_color = prev_brush.secondary_color
-        context.tool_settings.vertex_paint.brush = brush
+        set_vertex_paint_colors(context, color=prev_color, secondary_color=prev_secondary_color)
 
         return {'FINISHED'}
 
@@ -1209,11 +1233,14 @@ class VERTEXCOLORMASTER_OT_IsolateChannel(bpy.types.Operator):
 
         copy_channel(mesh, vcol, iso_vcol, channel_idx, channel_idx, dst_all_channels=True, alpha_mode='FILL')
         mesh.vertex_colors.active = iso_vcol
-        brush = context.tool_settings.vertex_paint.brush
-        settings.brush_color = brush.color
-        settings.brush_secondary_color = brush.secondary_color
-        brush.color = [settings.brush_value_isolate] * 3
-        brush.secondary_color = [settings.brush_secondary_value_isolate] * 3
+        color, secondary_color = get_vertex_paint_colors(context)
+        settings.brush_color = color
+        settings.brush_secondary_color = secondary_color
+        set_vertex_paint_colors(
+            context,
+            color=[settings.brush_value_isolate] * 3,
+            secondary_color=[settings.brush_secondary_value_isolate] * 3
+        )
 
         return {'FINISHED'}
 
@@ -1245,9 +1272,7 @@ class VERTEXCOLORMASTER_OT_ApplyIsolatedChannel(bpy.types.Operator):
 
         iso_vcol = mesh.vertex_colors.active
 
-        brush = context.tool_settings.vertex_paint.brush
-        brush.color = settings.brush_color
-        brush.secondary_color = settings.brush_secondary_color
+        set_vertex_paint_colors(context, color=settings.brush_color, secondary_color=settings.brush_secondary_color)
 
         if self.discard:
             mesh.vertex_colors.remove(iso_vcol)
@@ -1283,7 +1308,6 @@ class VERTEXCOLORMASTER_OT_FlipBrushColors(bpy.types.Operator):
         return (obj := bpy.context.object) and obj.mode == "VERTEX_PAINT"
 
     def execute(self, context):
-        brush = context.tool_settings.vertex_paint.brush
         settings = context.scene.vertex_color_master_settings
 
         obj = context.active_object
@@ -1294,11 +1318,9 @@ class VERTEXCOLORMASTER_OT_FlipBrushColors(bpy.types.Operator):
                 v2 = settings.brush_secondary_value_isolate
                 settings.brush_value_isolate = v2
                 settings.brush_secondary_value_isolate = v1
-                brush.color = Color((v2, v2, v2))
-                brush.secondary_color = Color((v1, v1, v1))
+                set_vertex_paint_colors(context, color=Color((v2, v2, v2)), secondary_color=Color((v1, v1, v1)))
         else:
-            color = Color(brush.color)
-            brush.color = brush.secondary_color
-            brush.secondary_color = color
+            color, secondary_color = get_vertex_paint_colors(context)
+            set_vertex_paint_colors(context, color=secondary_color, secondary_color=color)
 
         return {'FINISHED'}

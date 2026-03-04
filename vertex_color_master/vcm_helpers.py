@@ -24,6 +24,40 @@ from math import fmod
 from mathutils import Color, Vector
 from .vcm_globals import *
 
+def get_vertex_unified_paint_settings(context):
+    tool_settings = getattr(context, 'tool_settings', None)
+    vertex_paint = getattr(tool_settings, 'vertex_paint', None)
+    unified = getattr(vertex_paint, 'unified_paint_settings', None)
+    if unified is not None:
+        return unified
+    return getattr(tool_settings, 'unified_paint_settings', None)
+
+
+def get_vertex_paint_colors(context):
+    brush = context.tool_settings.vertex_paint.brush
+    unified = get_vertex_unified_paint_settings(context)
+    if unified is not None:
+        return Color(unified.color), Color(unified.secondary_color)
+    return Color(brush.color), Color(brush.secondary_color)
+
+
+def set_vertex_paint_colors(context, color=None, secondary_color=None):
+    brush = context.tool_settings.vertex_paint.brush
+    unified = get_vertex_unified_paint_settings(context)
+    if unified is not None and hasattr(unified, 'use_unified_color'):
+        unified.use_unified_color = True
+
+    if color is not None:
+        brush.color = color
+        if unified is not None and hasattr(unified, 'color'):
+            unified.color = color
+
+    if secondary_color is not None:
+        brush.secondary_color = secondary_color
+        if unified is not None and hasattr(unified, 'secondary_color'):
+            unified.secondary_color = secondary_color
+
+
 def posterize(value, steps):
     return round(value * steps) / steps
 

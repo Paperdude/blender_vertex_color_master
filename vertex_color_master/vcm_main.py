@@ -21,7 +21,11 @@ import bpy
 from bpy.props import *
 from mathutils import Color
 from .vcm_globals import *
-from .vcm_helpers import rgb_to_luminosity
+from .vcm_helpers import (
+    get_vertex_paint_colors,
+    set_vertex_paint_colors,
+    rgb_to_luminosity,
+)
 
 # VERTEXCOLORMASTER_Properties
 class VertexColorMasterProperties(bpy.types.PropertyGroup):
@@ -41,33 +45,28 @@ class VertexColorMasterProperties(bpy.types.PropertyGroup):
         if blue_id in active_channels:
             draw_color[2] = 1.0
 
-        context.tool_settings.vertex_paint.brush.color = draw_color
+        set_vertex_paint_colors(context, color=draw_color)
 
         return None
 
     def update_brush_value_isolate(self, context):
-        brush = context.tool_settings.vertex_paint.brush
         v1 = self.brush_value_isolate
         v2 = self.brush_secondary_value_isolate
-        brush.color = Color((v1, v1, v1))
-        brush.secondary_color = Color((v2, v2, v2))
+        set_vertex_paint_colors(context, color=Color((v1, v1, v1)), secondary_color=Color((v2, v2, v2)))
 
         return None
 
     def toggle_grayscale(self, context):
-        brush = context.tool_settings.vertex_paint.brush
-
         if self.use_grayscale:
-            self.brush_color = brush.color
-            self.brush_secondary_color = brush.secondary_color
+            color, secondary_color = get_vertex_paint_colors(context)
+            self.brush_color = color
+            self.brush_secondary_color = secondary_color
 
             v1 = self.brush_value_isolate
             v2 = self.brush_secondary_value_isolate
-            brush.color = Color((v1, v1, v1))
-            brush.secondary_color = Color((v2, v2, v2))
+            set_vertex_paint_colors(context, color=Color((v1, v1, v1)), secondary_color=Color((v2, v2, v2)))
         else:
-            brush.color = self.brush_color
-            brush.secondary_color = self.brush_secondary_color
+            set_vertex_paint_colors(context, color=self.brush_color, secondary_color=self.brush_secondary_color)
 
         return None
 

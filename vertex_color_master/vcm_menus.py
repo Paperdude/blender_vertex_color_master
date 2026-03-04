@@ -23,6 +23,7 @@ from bpy.props import *
 
 from .vcm_globals import *
 from .vcm_helpers import (
+    get_vertex_unified_paint_settings,
     get_isolated_channel_ids,
     get_layer_info,
 )
@@ -141,6 +142,7 @@ class VERTEXCOLORMASTER_MT_PieMain(Menu):
 # Menu functions for drawing sub-panels
 def draw_brush_settings(context, layout, obj, settings, mode='STANDARD', pie=False):
     brush = context.tool_settings.vertex_paint.brush
+    unified = get_vertex_unified_paint_settings(context)
     col = layout.column()
     row = col.row()
     if pie:
@@ -163,8 +165,12 @@ def draw_brush_settings(context, layout, obj, settings, mode='STANDARD', pie=Fal
         row.operator('paint.vertex_color_set', text="Fill With Value")
     else:
         row = col.row(align=True)
-        row.prop(brush, 'color', text="")
-        row.prop(brush, 'secondary_color', text="")
+        if unified is not None:
+            row.prop(unified, 'color', text="")
+            row.prop(unified, 'secondary_color', text="")
+        else:
+            row.prop(brush, 'color', text="")
+            row.prop(brush, 'secondary_color', text="")
         row.separator()
         row.operator('vertexcolormaster.brush_colors_flip', text="", icon='FILE_REFRESH')
         row = col.row(align=False)
