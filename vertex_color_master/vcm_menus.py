@@ -23,9 +23,10 @@ from bpy.props import *
 
 from .vcm_globals import *
 from .vcm_helpers import (
-    get_vertex_unified_paint_settings,
+    get_active_color_layer,
     get_isolated_channel_ids,
     get_layer_info,
+    get_unified_paint_settings,
 )
 
 
@@ -44,13 +45,14 @@ class VERTEXCOLORMASTER_PT_MainPanel(bpy.types.Panel):
         obj = context.active_object
         settings = context.scene.vertex_color_master_settings
 
-        if not obj.data.vertex_colors.active:
+        active_vcol = get_active_color_layer(obj.data)
+        if active_vcol is None:
             layout.label(text="No active vertex color layer")
             return
 
         # use active mesh active vcol layer name to determine whether or not
         # should we be in isolate mode or not
-        isolate = get_isolated_channel_ids(obj.data.vertex_colors.active)
+        isolate = get_isolated_channel_ids(active_vcol)
         if isolate is not None:
             return self.draw_isolate_mode_layout(context, obj, isolate[0], isolate[1], settings)
 
@@ -104,7 +106,7 @@ class VERTEXCOLORMASTER_MT_PieMain(Menu):
         layout = self.layout
         obj = context.active_object
         settings = context.scene.vertex_color_master_settings
-        isolate = get_isolated_channel_ids(obj.data.vertex_colors.active)
+        isolate = get_isolated_channel_ids(get_active_color_layer(obj.data))
         mode = 'STANDARD' if isolate is None else 'ISOLATE'
 
         # create top level pie layout
@@ -142,7 +144,8 @@ class VERTEXCOLORMASTER_MT_PieMain(Menu):
 # Menu functions for drawing sub-panels
 def draw_brush_settings(context, layout, obj, settings, mode='STANDARD', pie=False):
     brush = context.tool_settings.vertex_paint.brush
-    unified = get_vertex_unified_paint_settings(context)
+    unified = get_unified_paint_settings(context)
+    use_unified = unified is not None and getattr(unified, 'use_unified_color', False)
     col = layout.column()
     row = col.row()
     if pie:
@@ -154,6 +157,9 @@ def draw_brush_settings(context, layout, obj, settings, mode='STANDARD', pie=Fal
         row.prop(settings, 'use_grayscale')
         row = col.row(align=False)
         row.prop(settings, 'match_brush_to_active_channels')
+        if unified is not None:
+            row = col.row(align=False)
+            row.prop(unified, 'use_unified_color', text="Use Unified Color")
 
     if mode != 'STANDARD' or settings.use_grayscale:
         row = col.row(align=True)
@@ -165,7 +171,7 @@ def draw_brush_settings(context, layout, obj, settings, mode='STANDARD', pie=Fal
         row.operator('paint.vertex_color_set', text="Fill With Value")
     else:
         row = col.row(align=True)
-        if unified is not None:
+        if use_unified and hasattr(unified, 'color') and hasattr(unified, 'secondary_color'):
             row.prop(unified, 'color', text="")
             row.prop(unified, 'secondary_color', text="")
         else:
@@ -232,6 +238,9 @@ def draw_active_channel_operations(context, layout, obj, settings, mode='STANDAR
     row.operator('vertexcolormaster.remap', text='Remap')
     if mode == 'STANDARD':
         row.operator('vertexcolormaster.randomize_mesh_island_colors_per_channel', text='Islands')
+    if mode == 'STANDARD':
+        row = col.row(align=True)
+        row.operator('vertexcolormaster.normalize_blend_mask', text='Normalize Mask')
 
 
 def draw_src_dst_operations(context, layout, obj, settings):

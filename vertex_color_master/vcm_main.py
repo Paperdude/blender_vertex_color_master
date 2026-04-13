@@ -22,51 +22,86 @@ from bpy.props import *
 from mathutils import Color
 from .vcm_globals import *
 from .vcm_helpers import (
-    get_vertex_paint_colors,
-    set_vertex_paint_colors,
+    get_effective_paint_colors,
+    get_color_layers,
+    get_paint_brush_candidates,
+    set_paint_colors,
+    sync_paint_color_sources,
     rgb_to_luminosity,
 )
 
 # VERTEXCOLORMASTER_Properties
 class VertexColorMasterProperties(bpy.types.PropertyGroup):
 
+    def get_brush_color_ui(self):
+        color, _ = get_effective_paint_colors(bpy.context)
+        return (color[0], color[1], color[2])
+
+    def set_brush_color_ui(self, value):
+        ctx = bpy.context
+        set_paint_colors(ctx, primary=value)
+
+    def get_brush_secondary_color_ui(self):
+        _, secondary_color = get_effective_paint_colors(bpy.context)
+        return (secondary_color[0], secondary_color[1], secondary_color[2])
+
+    def set_brush_secondary_color_ui(self, value):
+        ctx = bpy.context
+        set_paint_colors(ctx, secondary=value)
+
     def update_active_channels(self, context):
+        sync_paint_color_sources(context)
         if self.use_grayscale or not self.match_brush_to_active_channels:
             return None
 
         active_channels = self.active_channels
+        alpha_only = active_channels == {alpha_id}
 
         # set draw color based on mask
-        draw_color = [0.0, 0.0, 0.0]
-        if red_id in active_channels:
-            draw_color[0] = 1.0
-        if green_id in active_channels:
-            draw_color[1] = 1.0
-        if blue_id in active_channels:
-            draw_color[2] = 1.0
+        if alpha_only:
+            value = 1.0 - self.brush_value_isolate
+            draw_color = [value, value, value]
+        else:
+            draw_color = [0.0, 0.0, 0.0]
+            if red_id in active_channels:
+                draw_color[0] = 1.0
+            if green_id in active_channels:
+                draw_color[1] = 1.0
+            if blue_id in active_channels:
+                draw_color[2] = 1.0
 
-        set_vertex_paint_colors(context, color=draw_color)
+        for brush in get_paint_brush_candidates(context):
+            if hasattr(brush, 'use_alpha'):
+                try:
+                    if alpha_id in active_channels:
+                        brush.use_alpha = True
+                except Exception:
+                    pass
+
+        set_paint_colors(context, primary=draw_color)
 
         return None
 
     def update_brush_value_isolate(self, context):
+        sync_paint_color_sources(context)
         v1 = self.brush_value_isolate
         v2 = self.brush_secondary_value_isolate
-        set_vertex_paint_colors(context, color=Color((v1, v1, v1)), secondary_color=Color((v2, v2, v2)))
+        set_paint_colors(context, primary=Color((v1, v1, v1)), secondary=Color((v2, v2, v2)))
 
         return None
 
     def toggle_grayscale(self, context):
+        sync_paint_color_sources(context)
         if self.use_grayscale:
-            color, secondary_color = get_vertex_paint_colors(context)
+            color, secondary_color = get_effective_paint_colors(context)
             self.brush_color = color
             self.brush_secondary_color = secondary_color
 
             v1 = self.brush_value_isolate
             v2 = self.brush_secondary_value_isolate
-            set_vertex_paint_colors(context, color=Color((v1, v1, v1)), secondary_color=Color((v2, v2, v2)))
+            set_paint_colors(context, primary=Color((v1, v1, v1)), secondary=Color((v2, v2, v2)))
         else:
-            set_vertex_paint_colors(context, color=self.brush_color, secondary_color=self.brush_secondary_color)
+            set_paint_colors(context, primary=self.brush_color, secondary=self.brush_secondary_color)
 
         return None
 
@@ -106,6 +141,26 @@ class VertexColorMasterProperties(bpy.types.PropertyGroup):
         default=(1, 0, 0)
     )
 
+    brush_color_ui: FloatVectorProperty(
+        name="Brush Color",
+        description="Brush primary color.",
+        subtype='COLOR',
+        min=0.0, max=1.0,
+        default=(1, 0, 0),
+        get=get_brush_color_ui,
+        set=set_brush_color_ui
+    )
+
+    brush_secondary_color_ui: FloatVectorProperty(
+        name="Brush Secondary Color",
+        description="Brush secondary color.",
+        subtype='COLOR',
+        min=0.0, max=1.0,
+        default=(0, 0, 0),
+        get=get_brush_secondary_color_ui,
+        set=set_brush_secondary_color_ui
+    )
+
     # Replacement for color in the isolate mode UI
     brush_value_isolate: FloatProperty(
         name="Brush Value",
@@ -127,9 +182,10 @@ class VertexColorMasterProperties(bpy.types.PropertyGroup):
         obj = context.active_object
         mesh = obj.data
 
-        items = [] if mesh.vertex_colors is None else [
+        color_layers = get_color_layers(mesh)
+        items = [
             ("{0} {1}".format(type_vcol, vcol.name), 
-             vcol.name, "") for vcol in mesh.vertex_colors]
+             vcol.name, "") for vcol in color_layers]
         ext = [] if obj.vertex_groups is None else [
             ("{0} {1}".format(type_vgroup, group.name),
              "W: " + group.name, "") for group in obj.vertex_groups]

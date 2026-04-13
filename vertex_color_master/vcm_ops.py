@@ -33,6 +33,53 @@ import gpu # used for drawing lines
 from gpu_extras.batch import batch_for_shader
 from bpy_extras import view3d_utils
 
+
+def _get_brush_by_vertex_tool(vertex_tool):
+    for brush in bpy.data.brushes:
+        if getattr(brush, 'vertex_tool', None) == vertex_tool:
+            return brush
+    return None
+
+
+def _safe_set_enum_value(obj, attr_name, value):
+    if obj is None or not hasattr(obj, attr_name):
+        return False
+    try:
+        setattr(obj, attr_name, value)
+        return True
+    except Exception:
+        return False
+
+
+def _try_select_vertex_brush_tool(target_tool):
+    op = bpy.ops.paint.brush_select
+    if not op.poll():
+        return False
+
+    prop_names = {p.identifier for p in op.get_rna_type().properties}
+    kwargs = {}
+
+    # API names changed across Blender versions.
+    if 'mode' in prop_names:
+        kwargs['mode'] = 'VERTEX_PAINT'
+    if 'paint_mode' in prop_names:
+        kwargs['paint_mode'] = 'VERTEX_PAINT'
+
+    for tool_prop in ('vertex_tool', 'vertex_paint_tool', 'tool'):
+        if tool_prop in prop_names:
+            kwargs[tool_prop] = target_tool
+            break
+
+    if len(kwargs) == 0:
+        return False
+
+    try:
+        op(**kwargs)
+        return True
+    except Exception:
+        return False
+
+
 def draw_gradient_callback(self, context, line_params, line_shader, circle_shader):
     line_batch = batch_for_shader(line_shader, 'LINES', {
         "pos": line_params["coords"],
@@ -157,7 +204,12 @@ class VERTEXCOLORMASTER_OT_Gradient(bpy.types.Operator):
             c1_val = start_color.v
             val_separation = end_color.v - c1_val
 
-        color_layer = bm.loops.layers.color.active
+        active_vcol = get_active_color_layer(mesh)
+        layer_name = active_vcol.name if active_vcol is not None else None
+        color_layer = get_bmesh_active_color_layer(bm, layer_name)
+        if color_layer is None:
+            bm.free()
+            return
 
         for data in vertex_data:
             vertex = data[0]
@@ -206,22 +258,23 @@ class VERTEXCOLORMASTER_OT_Gradient(bpy.types.Operator):
         return end
 
     def modal(self, context, event):
+        sync_paint_color_sources(context)
         context.area.tag_redraw()
 
         # Begin gradient line and initialize draw handler
         if self._handle is None:
             if event.type == 'LEFTMOUSE':
                 # Store the foreground and background color for redo
-                brush = context.tool_settings.vertex_paint.brush
-                self.start_color = brush.color
-                self.end_color = brush.secondary_color
+                color, secondary_color = get_effective_paint_colors(context)
+                self.start_color = color
+                self.end_color = secondary_color
 
                 # Create arguments to pass to the draw handler callback
                 mouse_position = Vector((event.mouse_region_x, event.mouse_region_y))
                 self.line_params = {
                     "coords": [mouse_position, mouse_position],
-                    "colors": [brush.color[:] + (1.0,),
-                               brush.secondary_color[:] + (1.0,)],
+                    "colors": [color[:] + (1.0,),
+                               secondary_color[:] + (1.0,)],
                     "width": 1, # currently does nothing
                 }
                 args = (self, context, self.line_params, self.line_shader,
@@ -251,7 +304,7 @@ class VERTEXCOLORMASTER_OT_Gradient(bpy.types.Operator):
                     # Use color gradient or force grayscale in isolate mode
                     start_color = line_params["colors"][0]
                     end_color = line_params["colors"][1]
-                    isolate = get_isolated_channel_ids(context.active_object.data.vertex_colors.active)
+                    isolate = get_isolated_channel_ids(get_active_color_layer(context.active_object.data))
                     use_hue_blend = self.use_hue_blend
                     if isolate is not None:
                         start_color = [rgb_to_luminosity(start_color)] * 3
@@ -281,7 +334,7 @@ class VERTEXCOLORMASTER_OT_Gradient(bpy.types.Operator):
         end_color = self.end_color
 
         # Use color gradient or force grayscale in isolate mode
-        isolate = get_isolated_channel_ids(context.active_object.data.vertex_colors.active)
+        isolate = get_isolated_channel_ids(get_active_color_layer(context.active_object.data))
         use_hue_blend = self.use_hue_blend
         if isolate is not None:
             start_color = [rgb_to_luminosity(start_color)] * 3
@@ -408,7 +461,13 @@ class VERTEXCOLORMASTER_OT_RandomizeMeshIslandColors(bpy.types.Operator):
 
         bm = bmesh.from_edit_mesh(mesh)
         bm.faces.ensure_lookup_table()
-        color_layer = bm.loops.layers.color.active
+        active_vcol = get_active_color_layer(mesh)
+        layer_name = active_vcol.name if active_vcol is not None else None
+        color_layer = get_bmesh_active_color_layer(bm, layer_name)
+        if color_layer is None:
+            bm.free()
+            bpy.ops.object.mode_set(mode='VERTEX_PAINT', toggle=False)
+            return {'CANCELLED'}
 
         # Find all islands in the mesh
         mesh_islands = []
@@ -434,7 +493,7 @@ class VERTEXCOLORMASTER_OT_RandomizeMeshIslandColors(bpy.types.Operator):
         separationDiff = 1.0 if len(mesh_islands) == 0 else 1.0 / len(mesh_islands)
 
         # If we are in isolate mode, this is used to force greyscale
-        isolate = get_isolated_channel_ids(context.active_object.data.vertex_colors.active)
+        isolate = get_isolated_channel_ids(get_active_color_layer(context.active_object.data))
 
         for index, island in enumerate(mesh_islands):
             color = Color((1, 0, 0)) # (0, 1, 1) HSV
@@ -557,7 +616,7 @@ class VERTEXCOLORMASTER_OT_RandomizeMeshIslandColorsPerChannel(bpy.types.Operato
     def execute(self, context):
         obj = context.active_object
         mesh = obj.data
-        isolate = get_isolated_channel_ids(mesh.vertex_colors.active)
+        isolate = get_isolated_channel_ids(get_active_color_layer(mesh))
         if isolate is not None:
             self.report({'ERROR'}, "Randomise Islands Per Channel does not work in isolate mode")
             return {'CANCELLED'}
@@ -607,7 +666,7 @@ class VERTEXCOLORMASTER_OT_BlurChannel(bpy.types.Operator):
     def execute(self, context):
         obj = context.active_object
         mesh = obj.data
-        vcol = mesh.vertex_colors.active if mesh.vertex_colors else mesh.vertex_colors.new()
+        vcol = ensure_active_color_layer(mesh)
         isolate = get_isolated_channel_ids(vcol)
 
         if isolate is None:
@@ -935,7 +994,7 @@ class VERTEXCOLORMASTER_OT_Fill(bpy.types.Operator):
         settings = context.scene.vertex_color_master_settings
 
         mesh = context.active_object.data
-        vcol = mesh.vertex_colors.active if mesh.vertex_colors else mesh.vertex_colors.new()
+        vcol = ensure_active_color_layer(mesh)
 
         isolate_mode = get_isolated_channel_ids(vcol) is not None
 
@@ -976,7 +1035,7 @@ class VERTEXCOLORMASTER_OT_Invert(bpy.types.Operator):
         settings = context.scene.vertex_color_master_settings
 
         mesh = context.active_object.data
-        vcol = mesh.vertex_colors.active if mesh.vertex_colors else mesh.vertex_colors.new()
+        vcol = ensure_active_color_layer(mesh)
         active_channels = settings.active_channels if get_isolated_channel_ids(vcol) is None else ['R', 'G', 'B']
 
         invert_selected(mesh, vcol, active_channels)
@@ -1010,7 +1069,7 @@ class VERTEXCOLORMASTER_OT_Posterize(bpy.types.Operator):
         steps = self.steps - 1
 
         mesh = context.active_object.data
-        vcol = mesh.vertex_colors.active if mesh.vertex_colors else mesh.vertex_colors.new()
+        vcol = ensure_active_color_layer(mesh)
         active_channels = settings.active_channels if get_isolated_channel_ids(vcol) is None else ['R', 'G', 'B']
 
         posterize_selected(mesh, vcol, steps, active_channels)
@@ -1085,7 +1144,7 @@ class VERTEXCOLORMASTER_OT_Remap(bpy.types.Operator):
         settings = context.scene.vertex_color_master_settings
 
         mesh = context.active_object.data
-        vcol = mesh.vertex_colors.active if mesh.vertex_colors else mesh.vertex_colors.new()
+        vcol = ensure_active_color_layer(mesh)
         self.isolate_mode = True if get_isolated_channel_ids(vcol) is not None else False
         self.active_channels = settings.active_channels if not self.isolate_mode else {'R', 'G', 'B'}
         
@@ -1093,10 +1152,33 @@ class VERTEXCOLORMASTER_OT_Remap(bpy.types.Operator):
 
     def execute(self, context):
         mesh = context.active_object.data
-        vcol = mesh.vertex_colors.active if mesh.vertex_colors else mesh.vertex_colors.new()
+        vcol = ensure_active_color_layer(mesh)
 
         remap_selected(mesh, vcol, self.min0, self.max0, self.min1, self.max1, self.active_channels)
 
+        return {'FINISHED'}
+
+
+class VERTEXCOLORMASTER_OT_NormalizeBlendMask(bpy.types.Operator):
+    """Normalize RGB so the sum never exceeds 1 and store the leftover in Alpha"""
+    bl_idname = 'vertexcolormaster.normalize_blend_mask'
+    bl_label = 'VCM Normalize Blend Mask'
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return obj is not None and obj.mode == 'VERTEX_PAINT' and obj.type == 'MESH'
+
+    def execute(self, context):
+        mesh = context.active_object.data
+        vcol = ensure_active_color_layer(mesh)
+
+        if get_isolated_channel_ids(vcol) is not None:
+            self.report({'ERROR'}, "Blend mask normalization is unavailable in isolate mode.")
+            return {'FINISHED'}
+
+        normalize_blend_mask(mesh, vcol)
         return {'FINISHED'}
 
 
@@ -1119,46 +1201,56 @@ class VERTEXCOLORMASTER_OT_EditBrushSettings(bpy.types.Operator):
         return obj is not None and obj.mode == 'VERTEX_PAINT' and obj.type == 'MESH'
 
     def execute(self, context):
-        prev_color, prev_secondary_color = get_vertex_paint_colors(context)
+        sync_paint_color_sources(context)
         brush = context.tool_settings.vertex_paint.brush
+        color, secondary_color = get_effective_paint_colors(context)
 
         if self.blend_mode == 'BLUR':
-            applied = False
-            try:
-                bpy.ops.paint.brush_select(mode='VERTEX_PAINT', vertex_tool='BLUR')
-                applied = True
-            except Exception:
-                pass
+            applied = _try_select_vertex_brush_tool('BLUR')
+
+            if not applied:
+                blur_brush = _get_brush_by_vertex_tool('BLUR')
+                if blur_brush is None:
+                    for candidate in bpy.data.brushes:
+                        if 'blur' in candidate.name.lower() and getattr(candidate, 'use_paint_vertex', True):
+                            blur_brush = candidate
+                            break
+
+                if blur_brush is not None:
+                    context.tool_settings.vertex_paint.brush = blur_brush
+                    brush = blur_brush
+                    applied = True
+
+                applied = _safe_set_enum_value(brush, 'vertex_tool', 'BLUR') or applied
+                applied = _safe_set_enum_value(brush, 'blend', 'BLUR') or applied
+
+            if not applied:
+                for tool_id in ("builtin_brush.Blur", "builtin.blur", "builtin_brush.Average", "builtin_brush.Smear"):
+                    try:
+                        bpy.ops.wm.tool_set_by_id(name=tool_id)
+                        applied = True
+                        break
+                    except Exception:
+                        continue
+
             if not applied:
                 try:
-                    bpy.ops.paint.brush_select(paint_mode='VERTEX_PAINT', vertex_paint_tool='BLUR')
-                    applied = True
+                    bpy.ops.wm.tool_set_by_id(name="builtin_brush.Draw")
                 except Exception:
                     pass
-            if not applied:
-                try:
-                    bpy.ops.wm.tool_set_by_id(name="builtin_brush.Blur")
-                    applied = True
-                except Exception:
-                    pass
-            if not applied and hasattr(brush, 'blend'):
-                try:
-                    brush.blend = 'BLUR'
-                    applied = True
-                except Exception:
-                    pass
+                draw_brush = context.tool_settings.vertex_paint.brush
+                applied = _safe_set_enum_value(draw_brush, 'blend', 'BLUR') or \
+                    _safe_set_enum_value(draw_brush, 'vertex_tool', 'BLUR') or applied
+
             if not applied:
                 self.report({'WARNING'}, "Blur mode is unavailable for current brush/tool in this Blender version.")
         else:
-            if hasattr(brush, 'vertex_tool'):
-                try:
-                    brush.vertex_tool = 'DRAW'
-                except Exception:
-                    pass
-            if hasattr(brush, 'blend'):
-                brush.blend = self.blend_mode
+            applied = _safe_set_enum_value(brush, 'blend', self.blend_mode)
+            _safe_set_enum_value(brush, 'vertex_tool', 'DRAW')
+            if not applied:
+                self.report({'WARNING'}, f"Blend mode '{self.blend_mode}' is unavailable for current brush.")
 
-        set_vertex_paint_colors(context, color=prev_color, secondary_color=prev_secondary_color)
+        set_paint_colors(context, primary=color, secondary=secondary_color)
 
         return {'FINISHED'}
 
@@ -1185,7 +1277,7 @@ class VERTEXCOLORMASTER_OT_QuickFill(bpy.types.Operator):
         settings = context.scene.vertex_color_master_settings
 
         mesh = context.active_object.data
-        vcol = mesh.vertex_colors.active if mesh.vertex_colors else mesh.vertex_colors.new()
+        vcol = ensure_active_color_layer(mesh)
 
         quick_fill_selected(mesh, vcol, self.fill_color)
 
@@ -1210,36 +1302,36 @@ class VERTEXCOLORMASTER_OT_IsolateChannel(bpy.types.Operator):
         return obj is not None and obj.mode == 'VERTEX_PAINT' and obj.type == 'MESH'
 
     def execute(self, context):
+        sync_paint_color_sources(context)
         settings = context.scene.vertex_color_master_settings
         obj = context.active_object
         mesh = obj.data
 
-        if not mesh.vertex_colors:
+        if not has_any_color_layers(mesh):
             self.report({'ERROR'}, "Mesh has no vertex color layer to isolate.")
             return {'FINISHED'}
 
         # get the vcol and channel to isolate
         # create empty vcol using name template
-        vcol = mesh.vertex_colors.active
+        vcol = get_active_color_layer(mesh)
         iso_vcol_id = "{0}_{1}_{2}".format(isolate_mode_name_prefix, self.src_channel_id, vcol.name)
-        if iso_vcol_id in mesh.vertex_colors:
+        if get_color_layer_by_name(mesh, iso_vcol_id) is not None:
             error = "{0} Channel has already been isolated to {1}. Apply or Discard before isolating again.".format(self.src_channel_id, iso_vcol_id)
             self.report({'ERROR'}, error)
             return {'FINISHED'}
 
-        iso_vcol = mesh.vertex_colors.new()
-        iso_vcol.name = iso_vcol_id
+        iso_vcol = create_color_layer(mesh, iso_vcol_id)
         channel_idx = channel_id_to_idx(self.src_channel_id)
 
         copy_channel(mesh, vcol, iso_vcol, channel_idx, channel_idx, dst_all_channels=True, alpha_mode='FILL')
-        mesh.vertex_colors.active = iso_vcol
-        color, secondary_color = get_vertex_paint_colors(context)
+        set_active_color_layer(mesh, iso_vcol)
+        color, secondary_color = get_effective_paint_colors(context)
         settings.brush_color = color
         settings.brush_secondary_color = secondary_color
-        set_vertex_paint_colors(
+        set_paint_colors(
             context,
-            color=[settings.brush_value_isolate] * 3,
-            secondary_color=[settings.brush_secondary_value_isolate] * 3
+            primary=[settings.brush_value_isolate] * 3,
+            secondary=[settings.brush_secondary_value_isolate] * 3
         )
 
         return {'FINISHED'}
@@ -1260,27 +1352,31 @@ class VERTEXCOLORMASTER_OT_ApplyIsolatedChannel(bpy.types.Operator):
     @classmethod
     def poll(cls, context):
         obj = context.active_object
-        if obj is not None and obj.type == 'MESH' and obj.data.vertex_colors:
-            vcol = obj.data.vertex_colors.active
+        if obj is not None and obj.type == 'MESH' and has_any_color_layers(obj.data):
+            vcol = get_active_color_layer(obj.data)
             # operator will not work if the active vcol name doesn't match the right template
             vcol_info = get_isolated_channel_ids(vcol)
             return vcol_info is not None
 
     def execute(self, context):
+        sync_paint_color_sources(context)
         settings = context.scene.vertex_color_master_settings
         mesh = context.active_object.data
 
-        iso_vcol = mesh.vertex_colors.active
-
-        set_vertex_paint_colors(context, color=settings.brush_color, secondary_color=settings.brush_secondary_color)
-
-        if self.discard:
-            mesh.vertex_colors.remove(iso_vcol)
-            return {'FINISHED'}
-
+        iso_vcol = get_active_color_layer(mesh)
         vcol_info = get_isolated_channel_ids(iso_vcol)
 
-        vcol = mesh.vertex_colors[vcol_info[0]]
+        set_paint_colors(context, primary=settings.brush_color, secondary=settings.brush_secondary_color)
+
+        if self.discard:
+            if vcol_info is not None:
+                vcol = get_color_layer_by_name(mesh, vcol_info[0])
+                if vcol is not None:
+                    set_active_color_layer(mesh, vcol)
+            remove_color_layer(mesh, iso_vcol)
+            return {'FINISHED'}
+
+        vcol = get_color_layer_by_name(mesh, vcol_info[0])
         channel_idx = channel_id_to_idx(vcol_info[1])
 
         if vcol is None:
@@ -1290,8 +1386,8 @@ class VERTEXCOLORMASTER_OT_ApplyIsolatedChannel(bpy.types.Operator):
 
         # assuming iso_vcol has only grayscale data, RGB are equal, so copy from R
         copy_channel(mesh, iso_vcol, vcol, 0, channel_idx)
-        mesh.vertex_colors.active = vcol
-        mesh.vertex_colors.remove(iso_vcol)
+        set_active_color_layer(mesh, vcol)
+        remove_color_layer(mesh, iso_vcol)
 
         return {'FINISHED'}
 
@@ -1308,19 +1404,20 @@ class VERTEXCOLORMASTER_OT_FlipBrushColors(bpy.types.Operator):
         return (obj := bpy.context.object) and obj.mode == "VERTEX_PAINT"
 
     def execute(self, context):
+        sync_paint_color_sources(context)
         settings = context.scene.vertex_color_master_settings
 
         obj = context.active_object
-        if context.object.mode == 'VERTEX_PAINT' and obj is not None and obj.type == 'MESH' \
-            and get_isolated_channel_ids(context.active_object.data.vertex_colors.active) is not None \
-            or settings.use_grayscale:
+        is_isolate_mode = obj is not None and obj.type == 'MESH' and \
+            get_isolated_channel_ids(get_active_color_layer(obj.data)) is not None
+        if (context.object.mode == 'VERTEX_PAINT' and is_isolate_mode) or settings.use_grayscale:
                 v1 = settings.brush_value_isolate
                 v2 = settings.brush_secondary_value_isolate
                 settings.brush_value_isolate = v2
                 settings.brush_secondary_value_isolate = v1
-                set_vertex_paint_colors(context, color=Color((v2, v2, v2)), secondary_color=Color((v1, v1, v1)))
+                set_paint_colors(context, primary=Color((v2, v2, v2)), secondary=Color((v1, v1, v1)))
         else:
-            color, secondary_color = get_vertex_paint_colors(context)
-            set_vertex_paint_colors(context, color=secondary_color, secondary_color=color)
+            color, secondary_color = get_effective_paint_colors(context)
+            set_paint_colors(context, primary=secondary_color, secondary=color)
 
         return {'FINISHED'}

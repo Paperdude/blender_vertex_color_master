@@ -24,38 +24,273 @@ from math import fmod
 from mathutils import Color, Vector
 from .vcm_globals import *
 
-def get_vertex_unified_paint_settings(context):
+def _is_corner_color_attribute(layer):
+    return layer is not None and getattr(layer, 'domain', None) == 'CORNER' and \
+        getattr(layer, 'data_type', None) in {'BYTE_COLOR', 'FLOAT_COLOR'}
+
+
+def get_color_layers(mesh):
+    if hasattr(mesh, 'color_attributes'):
+        return [layer for layer in mesh.color_attributes if _is_corner_color_attribute(layer)]
+    if hasattr(mesh, 'vertex_colors'):
+        return list(mesh.vertex_colors)
+    return []
+
+
+def has_any_color_layers(mesh):
+    return len(get_color_layers(mesh)) > 0
+
+
+def get_active_color_layer(mesh):
+    if hasattr(mesh, 'color_attributes'):
+        active = getattr(mesh.color_attributes, 'active_color', None)
+        if _is_corner_color_attribute(active):
+            return active
+
+        active = getattr(mesh.color_attributes, 'active', None)
+        if _is_corner_color_attribute(active):
+            return active
+
+        layers = get_color_layers(mesh)
+        return layers[0] if len(layers) > 0 else None
+
+    if hasattr(mesh, 'vertex_colors'):
+        return mesh.vertex_colors.active
+
+    return None
+
+
+def get_color_layer_by_name(mesh, layer_name):
+    for layer in get_color_layers(mesh):
+        if layer.name == layer_name:
+            return layer
+    return None
+
+
+def ensure_active_color_layer(mesh, layer_name="Col"):
+    layer = get_active_color_layer(mesh)
+    if layer is not None:
+        return layer
+    return create_color_layer(mesh, layer_name)
+
+
+def create_color_layer(mesh, layer_name):
+    if hasattr(mesh, 'color_attributes'):
+        layer = mesh.color_attributes.new(name=layer_name, type='BYTE_COLOR', domain='CORNER')
+        set_active_color_layer(mesh, layer)
+        return layer
+    if hasattr(mesh, 'vertex_colors'):
+        return mesh.vertex_colors.new(name=layer_name)
+    return None
+
+
+def set_active_color_layer(mesh, layer):
+    if layer is None:
+        return
+    if hasattr(mesh, 'color_attributes'):
+        if hasattr(mesh.color_attributes, 'active_color'):
+            mesh.color_attributes.active_color = layer
+        if hasattr(mesh.color_attributes, 'active'):
+            mesh.color_attributes.active = layer
+        return
+    if hasattr(mesh, 'vertex_colors'):
+        mesh.vertex_colors.active = layer
+
+
+def remove_color_layer(mesh, layer):
+    if layer is None:
+        return
+    if hasattr(mesh, 'color_attributes'):
+        mesh.color_attributes.remove(layer)
+        return
+    if hasattr(mesh, 'vertex_colors'):
+        mesh.vertex_colors.remove(layer)
+
+
+def get_bmesh_active_color_layer(bm, layer_name=None):
+    if layer_name:
+        if layer_name in bm.loops.layers.color:
+            return bm.loops.layers.color[layer_name]
+        if layer_name in bm.loops.layers.float_color:
+            return bm.loops.layers.float_color[layer_name]
+
+    color_layer = bm.loops.layers.color.active
+    if color_layer is not None:
+        return color_layer
+
+    float_color_layer = bm.loops.layers.float_color.active
+    if float_color_layer is not None:
+        return float_color_layer
+
+    if len(bm.loops.layers.color) > 0:
+        return bm.loops.layers.color[0]
+    if len(bm.loops.layers.float_color) > 0:
+        return bm.loops.layers.float_color[0]
+
+    return None
+
+
+def get_active_vertex_paint_brush(context):
+    tool_settings = getattr(context, 'tool_settings', None)
+    vertex_paint = getattr(tool_settings, 'vertex_paint', None)
+    return getattr(vertex_paint, 'brush', None)
+
+
+def get_workspace_vertex_tool_brush(context):
+    workspace = getattr(context, 'workspace', None)
+    tools = getattr(workspace, 'tools', None)
+    if tools is None:
+        return None
+
+    tool = None
+    try:
+        tool = tools.from_space_view3d_mode(mode='PAINT_VERTEX', create=False)
+    except Exception:
+        return None
+
+    if tool is None:
+        return None
+
+    # Common case: builtin_brush.<BrushName>
+    idname = getattr(tool, 'idname', '')
+    if isinstance(idname, str) and idname.startswith('builtin_brush.'):
+        brush_name = idname.split('.', 1)[1]
+        brush = bpy.data.brushes.get(brush_name)
+        if brush is not None:
+            return brush
+
+    # Fallback: inspect tool operator props for a brush name.
+    for op_id in ('paint.brush_select', 'paint.vertex_paint'):
+        try:
+            props = tool.operator_properties(op_id)
+        except Exception:
+            continue
+        for attr_name in ('brush', 'tool'):
+            value = getattr(props, attr_name, None)
+            if isinstance(value, str):
+                brush = bpy.data.brushes.get(value)
+                if brush is not None:
+                    return brush
+
+    return None
+
+
+def get_paint_brush_candidates(context):
+    tool_settings = getattr(context, 'tool_settings', None)
+    if tool_settings is None:
+        return []
+
+    brushes = []
+
+    workspace_brush = get_workspace_vertex_tool_brush(context)
+    if workspace_brush is not None:
+        brushes.append(workspace_brush)
+
+    # Vertex paint is the primary target for this addon.
+    vertex_paint = getattr(tool_settings, 'vertex_paint', None)
+    vertex_brush = getattr(vertex_paint, 'brush', None)
+    if vertex_brush is not None:
+        brushes.append(vertex_brush)
+
+    # Blender 5 tools can internally reuse paint brush datablocks from other paint slots.
+    for slot_name in ('image_paint', 'sculpt', 'weight_paint'):
+        slot = getattr(tool_settings, slot_name, None)
+        brush = getattr(slot, 'brush', None)
+        if brush is not None and brush not in brushes:
+            brushes.append(brush)
+
+    return brushes
+
+
+def get_unified_paint_settings(context):
     tool_settings = getattr(context, 'tool_settings', None)
     vertex_paint = getattr(tool_settings, 'vertex_paint', None)
     unified = getattr(vertex_paint, 'unified_paint_settings', None)
     if unified is not None:
         return unified
+
+    # Fallback for older Blender APIs.
     return getattr(tool_settings, 'unified_paint_settings', None)
 
 
-def get_vertex_paint_colors(context):
-    brush = context.tool_settings.vertex_paint.brush
-    unified = get_vertex_unified_paint_settings(context)
-    if unified is not None:
+def get_effective_paint_colors(context):
+    brushes = get_paint_brush_candidates(context)
+    unified = get_unified_paint_settings(context)
+
+    if unified is not None and getattr(unified, 'use_unified_color', False):
+        if hasattr(unified, 'color') and hasattr(unified, 'secondary_color'):
+            return Color(unified.color), Color(unified.secondary_color)
+
+    # In practice (Blender 5 vertex paint), brush colors are the most reliable source.
+    for brush in brushes:
+        if hasattr(brush, 'color') and hasattr(brush, 'secondary_color'):
+            return Color(brush.color), Color(brush.secondary_color)
+
+    if unified is not None and hasattr(unified, 'color') and hasattr(unified, 'secondary_color'):
         return Color(unified.color), Color(unified.secondary_color)
-    return Color(brush.color), Color(brush.secondary_color)
+
+    return Color((1.0, 1.0, 1.0)), Color((0.0, 0.0, 0.0))
 
 
-def set_vertex_paint_colors(context, color=None, secondary_color=None):
-    brush = context.tool_settings.vertex_paint.brush
-    unified = get_vertex_unified_paint_settings(context)
-    if unified is not None and hasattr(unified, 'use_unified_color'):
-        unified.use_unified_color = True
+def set_paint_colors(context, primary=None, secondary=None):
+    if context is None:
+        return
 
-    if color is not None:
-        brush.color = color
-        if unified is not None and hasattr(unified, 'color'):
-            unified.color = color
+    brushes = get_paint_brush_candidates(context)
+    unified = get_unified_paint_settings(context)
 
-    if secondary_color is not None:
-        brush.secondary_color = secondary_color
-        if unified is not None and hasattr(unified, 'secondary_color'):
-            unified.secondary_color = secondary_color
+    primary_value = tuple(primary[:3]) if primary is not None else None
+    secondary_value = tuple(secondary[:3]) if secondary is not None else None
+
+    for brush in brushes:
+        if hasattr(brush, 'color_type'):
+            try:
+                brush.color_type = 'COLOR'
+            except Exception:
+                pass
+
+    if primary_value is not None:
+        for brush in brushes:
+            if hasattr(brush, 'color'):
+                brush.color = primary_value
+        if unified is not None:
+            if hasattr(unified, 'color'):
+                unified.color = primary_value
+
+    if secondary_value is not None:
+        for brush in brushes:
+            if hasattr(brush, 'secondary_color'):
+                brush.secondary_color = secondary_value
+        if unified is not None:
+            if hasattr(unified, 'secondary_color'):
+                unified.secondary_color = secondary_value
+
+
+def sync_paint_color_sources(context):
+    if context is None:
+        return
+
+    brushes = get_paint_brush_candidates(context)
+    unified = get_unified_paint_settings(context)
+    if len(brushes) == 0 or unified is None:
+        return
+
+    # Mirror first valid paint brush colors into unified storage only (non-invasive).
+    source_brush = None
+    for brush in brushes:
+        if hasattr(brush, 'color') and hasattr(brush, 'secondary_color'):
+            source_brush = brush
+            break
+
+    if source_brush is None:
+        return
+
+    primary = source_brush.color
+    secondary = source_brush.secondary_color
+    if hasattr(unified, 'color'):
+        unified.color = primary
+    if hasattr(unified, 'secondary_color'):
+        unified.secondary_color = secondary
 
 
 def posterize(value, steps):
@@ -89,6 +324,9 @@ def get_active_channel_mask(active_channels):
 
 
 def get_isolated_channel_ids(vcol):
+    if vcol is None:
+        return None
+
     vcol_id = vcol.name
     prefix = isolate_mode_name_prefix
     prefix_len = len(prefix)
@@ -248,8 +486,10 @@ def normals_to_color(mesh, normals, dst_vcol):
 def color_to_normals(mesh, src_vcol):
     # ensure the mesh has empty split normals
     if not mesh.has_custom_normals:
-        mesh.create_normals_split()
-        mesh.use_auto_smooth = True
+        if hasattr(mesh, 'create_normals_split'):
+            mesh.create_normals_split()
+        if hasattr(mesh, 'use_auto_smooth'):
+            mesh.use_auto_smooth = True
 
     # create a structure that matches the required input of the normals_split_custom_set function
     clnors = [Vector()] * len(mesh.loops)
@@ -261,7 +501,7 @@ def color_to_normals(mesh, src_vcol):
         n.normalize()
         clnors[loop_index] = n   
 
-    mesh.normals_split_custom_set(clnors)   
+    mesh.normals_split_custom_set(clnors)
     mesh.update()  
 
 
@@ -482,6 +722,36 @@ def remap_selected(mesh, vcol, min0, max0, min1, max1, active_channels):
     mesh.update()
 
 
+def normalize_blend_mask(mesh, vcol):
+    if mesh.use_paint_mask:
+        loop_indices = [loop_index for face in mesh.polygons if face.select for loop_index in face.loop_indices]
+    else:
+        vertex_mask = True if mesh.use_paint_mask_vertex else False
+        verts = mesh.vertices
+        loop_indices = [
+            loop_index for loop_index, loop in enumerate(mesh.loops)
+            if not vertex_mask or verts[loop.vertex_index].select
+        ]
+
+    for loop_index in loop_indices:
+        c = list(vcol.data[loop_index].color)
+        rgb = [max(0.0, min(1.0, c[i])) for i in range(3)]
+        rgb_sum = rgb[0] + rgb[1] + rgb[2]
+
+        if rgb_sum > 1.0:
+            scale = 1.0 / rgb_sum
+            rgb = [channel * scale for channel in rgb]
+            rgb_sum = 1.0
+
+        c[0] = rgb[0]
+        c[1] = rgb[1]
+        c[2] = rgb[2]
+        c[3] = max(0.0, min(1.0, 1.0 - rgb_sum))
+        vcol.data[loop_index].color = c
+
+    mesh.update()
+
+
 def adjust_hsv(mesh, vcol, h_offset, s_offset, v_offset, colorize):
     if mesh.use_paint_mask:
         selected_faces = [face for face in mesh.polygons if face.select]
@@ -526,7 +796,13 @@ def set_island_colors_per_channel(mesh, rgba_mask, merge_similar, vmin, vmax):
 
     bm = bmesh.from_edit_mesh(mesh)
     bm.faces.ensure_lookup_table()
-    color_layer = bm.loops.layers.color.active
+    active_vcol = get_active_color_layer(mesh)
+    layer_name = active_vcol.name if active_vcol is not None else None
+    color_layer = get_bmesh_active_color_layer(bm, layer_name)
+    if color_layer is None:
+        bm.free()
+        bpy.ops.object.mode_set(mode='VERTEX_PAINT', toggle=False)
+        return
 
     # Find all islands in the mesh
     mesh_islands = []
@@ -604,7 +880,7 @@ def get_validated_input(context, get_src, get_dst):
 
     # are these conditions actually possible?
     if message is None:
-        if (src_type == type_vcol or dst_type == type_vcol) and mesh.vertex_colors is None:
+        if (src_type == type_vcol or dst_type == type_vcol) and not has_any_color_layers(mesh):
             message = "Object has no vertex colors."
         if (src_type == type_vgroup or dst_type == type_vgroup) and obj.vertex_groups is None:
             message = "Object has no vertex groups."
@@ -614,8 +890,9 @@ def get_validated_input(context, get_src, get_dst):
     # validate src
     if get_src and message is None:
         if src_type == type_vcol:
-            if src_id in mesh.vertex_colors:
-                rv['src_vcol'] = mesh.vertex_colors[src_id]
+            src_vcol = get_color_layer_by_name(mesh, src_id)
+            if src_vcol is not None:
+                rv['src_vcol'] = src_vcol
                 rv['src_channel_idx'] = channel_id_to_idx(settings.src_channel_id)
             else:
                 message = "Src color layer is not valid."
@@ -637,8 +914,9 @@ def get_validated_input(context, get_src, get_dst):
     # validate dst
     if get_dst and message is None:
         if dst_type == type_vcol:
-            if dst_id in mesh.vertex_colors:
-                rv['dst_vcol'] = mesh.vertex_colors[dst_id]
+            dst_vcol = get_color_layer_by_name(mesh, dst_id)
+            if dst_vcol is not None:
+                rv['dst_vcol'] = dst_vcol
                 rv['dst_channel_idx'] = channel_id_to_idx(settings.dst_channel_id)
             else:
                 message = "Dst color layer is not valid."

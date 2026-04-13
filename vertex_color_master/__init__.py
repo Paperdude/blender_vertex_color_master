@@ -54,6 +54,7 @@ classes = (
     vcm_ops.VERTEXCOLORMASTER_OT_Invert,
     vcm_ops.VERTEXCOLORMASTER_OT_Posterize,
     vcm_ops.VERTEXCOLORMASTER_OT_Remap,
+    vcm_ops.VERTEXCOLORMASTER_OT_NormalizeBlendMask,
     vcm_ops.VERTEXCOLORMASTER_OT_CopyChannel,
     vcm_ops.VERTEXCOLORMASTER_OT_RgbToGrayscale,
     vcm_ops.VERTEXCOLORMASTER_OT_BlendChannels,
